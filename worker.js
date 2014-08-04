@@ -12,17 +12,17 @@ function Worker(queueName, delHost, delPort, resTimeout, maxRetries) {
 
   var self = this;
 
-  self._hostName = delHost;
-  self._port = delPort;
+  self._delHost = delHost;
+  self._delPort = delPort;
 
   self._deleter = self._Deleter();
 
   self._deleter.on('error', function(err){
     console.log(err)
   });
-  self._toBeDeleted = {};
-  self._unAckedMessages = {};
-  self._deleter.listen(self._port, self._hostName);
+  self._reserved = {};
+  self._unAcked = {};
+  self._deleter.listen(self._delPort, self._delHost);
 
   self._maxRetries = maxRetries || 30;
 
@@ -44,12 +44,12 @@ Worker.prototype.eat = function () {
 
   queue.consume(function(message) {
     var uniqueId = message.fields.deliveryTag;
-    self._unAckedMessages[uniqueId] = message;
+    self._unAcked[uniqueId] = message;
 
     // nack unparsable messages
     if (!message || !message.content || !message.content.toString()) {
-      if (self._unAckedMessages[uniqueId]) {
-        delete self._unAckedMessages[uniqueId];
+      if (self._unAcked[uniqueId]) {
+        delete self._unAcked[uniqueId];
         queue.nack(message, false, false);
       }
       return;
@@ -59,8 +59,8 @@ Worker.prototype.eat = function () {
 
     //nack messages that are missing and endpoint or a payload
     if (!jsonContent.endpoint || !jsonContent.payload) {
-      if (self._unAckedMessages[uniqueId]) {
-        delete self._unAckedMessages[uniqueId];
+      if (self._unAcked[uniqueId]) {
+        delete self._unAcked[uniqueId];
         queue.nack(message, false, false);
       }
       return;
@@ -77,7 +77,7 @@ Worker.prototype.eat = function () {
         'user-agent': "IronMQ Pusherd",
         'Iron-Message-Id': uniqueId,
         'Iron-Subscriber-Message-Id': uniqueId,
-        'Iron-Subscriber-Message-Url': "http://" + self._hostName + ":" + self._port + "/" + uniqueId
+        'Iron-Subscriber-Message-Url': "http://" + self._delHost + ":" + self._delPort + "/" + uniqueId
       },
       json: jsonContent.payload
     };
@@ -111,8 +111,8 @@ Worker.prototype.eat = function () {
 
         else if (response.statusCode == 200) {
           //setImmediate(function(mess){queue.ack(mess)}, message);
-          if (self._unAckedMessages[uniqueId]) {
-            delete self._unAckedMessages[uniqueId];
+          if (self._unAcked[uniqueId]) {
+            delete self._unAcked[uniqueId];
             queue.ack(message);
           }
           // console.log("got a 200 " + new Date());
@@ -122,8 +122,8 @@ Worker.prototype.eat = function () {
         else if (response.statusCode == 202) {
           var timeout = (body.timeout * 1000) || self._timeout;
           var tp = setTimeout(incrementRetry, timeout);
-          self._toBeDeleted[uniqueId] = tp;
-          self._unAckedMessages[uniqueId] = message;
+          self._reserved[uniqueId] = tp;
+          self._unAcked[uniqueId] = message;
           done(null, count);
         }
         else {
@@ -155,10 +155,10 @@ Worker.prototype.eat = function () {
         queue.publish(JSON.stringify(jsonContent), {deliveryMode: true, mandatory: true});
       }
 
-      delete self._toBeDeleted[uniqueId];
-      if (self._unAckedMessages[uniqueId]) {
-        var mess = self._unAckedMessages[uniqueId];
-        delete self._unAckedMessages[uniqueId];
+      delete self._reserved[uniqueId];
+      if (self._unAcked[uniqueId]) {
+        var mess = self._unAcked[uniqueId];
+        delete self._unAcked[uniqueId];
         if (!mess) {
           console.log(mess);
         }
@@ -176,12 +176,12 @@ Worker.prototype._Deleter = function(){
     if (req.method == 'DELETE') {
       parsedUrl = require('url').parse(req.url);
       var deleteId = parsedUrl.path.substr(1);
-      if (self._toBeDeleted[deleteId]) {
-        clearTimeout(self._toBeDeleted[deleteId]);
-        self._queue.ack(self._unAckedMessages[deleteId]);
-          delete self._unAckedMessages[deleteId];
+      if (self._reserved[deleteId]) {
+        clearTimeout(self._reserved[deleteId]);
+        self._queue.ack(self._unAcked[deleteId]);
+          delete self._unAcked[deleteId];
 
-        delete self._toBeDeleted[deleteId];
+        delete self._reserved[deleteId];
 
         res.writeHead(200, {'Content-Type': "application/json; charset=UTF-8"});
         res.write('{"msg": "Deleted"}');
