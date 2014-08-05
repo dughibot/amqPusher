@@ -1,3 +1,5 @@
+//TODO: log stuff instead of using console.log
+
 var http = require('http');
 var amq = require('amq');
 var config = require('./workerConfig');
@@ -8,28 +10,29 @@ http.globalAgent.maxSockets = 5;
 
 module.exports = Worker;
 
-function Worker(queueName, delHost, delPort, resTimeout, maxRetries) {
+function Worker(queueName, delHost, delPort, resTime, maxRetries) {
 
   var self = this;
 
+  // Set up the reserved message deletion server
   self._delHost = delHost;
   self._delPort = delPort;
-
   self._deleter = self._Deleter();
-
   self._deleter.on('error', function(err){
+    //log error
     console.log(err)
   });
+  self._deleter.listen(self._delPort, self._delHost);
+
   self._reserved = {};
   self._unAcked = {};
-  self._deleter.listen(self._delPort, self._delHost);
 
   self._maxRetries = maxRetries || 30;
 
-  self._timeout = resTimeout || 60000;
+  self._timeout = resTime || 60000;
 
+  // Set up the queue
   self._connection = amq.createConnection(config.connOpts.amq, config.connOpts.sock);
-
   queueName = queueName || '';
   queueOpts = config.queueOpts;
   queueOpts.durable = queueOpts.durable || true;
@@ -100,15 +103,13 @@ Worker.prototype.eat = function () {
     function sendRequest(count, done) {
       request(handOpts, function (error, response, body) {
 
+        // on error, log error
         if (error) {
           console.log('trying for the ' + count + " time");
           done(error);
-          //if (count >= 19) {
-          //  incrementRetry();
-          //  console.log("requeuing message to" + jsonContent.endpoint + " with retryCount: " + jsonContent.retryCount);
-          //}
         }
 
+        // On 200, just ack and remove from unAcked object
         else if (response.statusCode == 200) {
           //setImmediate(function(mess){queue.ack(mess)}, message);
           if (self._unAcked[uniqueId]) {
@@ -119,6 +120,7 @@ Worker.prototype.eat = function () {
           done(null, count);
         }
 
+        // On 202, set up to republish the message after a timeout.
         else if (response.statusCode == 202) {
           var timeout = (body.timeout * 1000) || self._timeout;
           var tp = setTimeout(incrementRetry, timeout);
@@ -126,6 +128,8 @@ Worker.prototype.eat = function () {
           self._unAcked[uniqueId] = message;
           done(null, count);
         }
+
+        // On other response codes, requeue message with new error count and log error
         else {
           incrementRetry();
           console.log(response.statusCode + " from " + jsonContent.endpoint + " with retryCount: " + jsonContent.retryCount);
@@ -134,6 +138,7 @@ Worker.prototype.eat = function () {
       });
     }
 
+    // options for the re module
     var reOptions = {
       retries : 20,
       strategy : {
@@ -150,17 +155,21 @@ Worker.prototype.eat = function () {
 
 
     function incrementRetry() {
+      // update the retryCount and republish the message if it hasn't been retried too many times
       jsonContent.retryCount = jsonContent.retryCount ? jsonContent.retryCount + 1 : 1;
       if (jsonContent.retryCount < self._maxRetries) {
         queue.publish(JSON.stringify(jsonContent), {deliveryMode: true, mandatory: true});
       }
 
+      // remove the republish from the object of timeouts to republish reserved messages
       delete self._reserved[uniqueId];
+
+      // if the message hasn't been acked, ack it and remove it from the object of unacked messages
       if (self._unAcked[uniqueId]) {
         var mess = self._unAcked[uniqueId];
         delete self._unAcked[uniqueId];
         if (!mess) {
-          console.log(mess);
+          emit(new Error("Somehow tried to ack undefined")); //TODO: Is this how this should work?
         }
         queue.ack(mess);
       }
@@ -169,17 +178,23 @@ Worker.prototype.eat = function () {
   });
 };
 
+
+// the server for deleting reserved messages
 Worker.prototype._Deleter = function(){
   var self = this;
 
   return http.createServer(function (req, res) {
     if (req.method == 'DELETE') {
+
+      // get the message's delivery tag
       parsedUrl = require('url').parse(req.url);
       var deleteId = parsedUrl.path.substr(1);
+
+      // clear the republishing of the message, ack it, and delete it from the objects
       if (self._reserved[deleteId]) {
         clearTimeout(self._reserved[deleteId]);
         self._queue.ack(self._unAcked[deleteId]);
-          delete self._unAcked[deleteId];
+        delete self._unAcked[deleteId];
 
         delete self._reserved[deleteId];
 
@@ -187,6 +202,8 @@ Worker.prototype._Deleter = function(){
         res.write('{"msg": "Deleted"}');
         res.end();
       }
+
+      // if the message wasn't a reserved message, or was already republished, return a 403
       else {
         res.writeHead(403, {'Content-Type': "application/json; charset=UTF-8"});
         res.write('{"msg" : "Not Reserved"');
