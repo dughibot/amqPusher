@@ -10,7 +10,7 @@ http.globalAgent.maxSockets = 5;
 
 module.exports = Worker;
 
-function Worker(queueName, delHost, delPort, resTime, maxRetries) {
+function Worker(delHost, delPort, queueName, resTime, maxRetries) {
 
   var self = this;
 
