@@ -169,7 +169,7 @@ Worker.prototype.eat = function () {
         var mess = self._unAcked[uniqueId];
         delete self._unAcked[uniqueId];
         if (!mess) {
-          emit(new Error("Somehow tried to ack undefined")); //TODO: Is this how this should work?
+          throw (new Error("Somehow tried to ack undefined")); //TODO: Is this how this should work?
         }
         queue.ack(mess);
       }
